@@ -1,0 +1,86 @@
+name: Build patched Raspberry Pi 5 update
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - aiden/pi5-i2c-arm-build
+
+permissions:
+  contents: write
+
+jobs:
+  build-pi5:
+    name: Build umbrelOS Pi 5 update with I2C enabled
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
+          docker system prune -af || true
+          df -h
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Expose GitHub Actions runtime for Docker cache
+        uses: crazy-max/ghaction-github-runtime@3cb05d89e1f492524af3d41a1c98c83bc3025124
+
+      - name: Build Pi 5 update bundle
+        working-directory: packages/os
+        env:
+          SKIP_AMD64: "true"
+          SKIP_ARM64: "true"
+          SKIP_PI4: "true"
+          SKIP_PI_MBR: "true"
+          SKIP_MENDER_ARTIFACTS: "true"
+        run: npm run build
+
+      - name: Verify patched source and update artifact
+        run: |
+          grep -n 'dtparam=i2c_arm=on' packages/os/build-steps/setup-raspberrypi/config.txt
+          grep -n 'i2c-dev' packages/os/overlay-pi/etc/modules-load.d/i2c-dev.conf
+          test -s packages/os/build/umbrelos-pi.update
+          ls -lh packages/os/build/umbrelos-pi.update
+
+      - name: Checksum update bundle
+        working-directory: packages/os/build
+        run: |
+          cp umbrelos-pi.update umbrelos-pi5-i2c-arm.update
+          sha256sum umbrelos-pi5-i2c-arm.update | tee umbrelos-pi5-i2c-arm.update.sha256
+          ls -lh umbrelos-pi5-i2c-arm.update*
+
+      - name: Upload Pi 5 update artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: umbrelos-pi5-i2c-arm-update
+          path: |
+            packages/os/build/umbrelos-pi5-i2c-arm.update
+            packages/os/build/umbrelos-pi5-i2c-arm.update.sha256
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="pi5-i2c-arm-update-${GITHUB_SHA::8}"
+          gh release delete "$tag" --cleanup-tag --yes 2>/dev/null || true
+          gh release create "$tag" \
+            packages/os/build/umbrelos-pi5-i2c-arm.update \
+            packages/os/build/umbrelos-pi5-i2c-arm.update.sha256 \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "umbrelOS Pi 5 I2C update test build (${GITHUB_SHA::8})" \
+            --notes "Test Rugix update bundle from branch \`aiden/pi5-i2c-arm-build\`. Raspberry Pi config includes \`dtparam=i2c_arm=on\` and the Pi overlay loads \`i2c-dev\` so /dev/i2c-* devices are exposed for peripherals. Install only on Rugix-based Raspberry Pi umbrelOS systems."
+          echo "Release: https://github.com/${GITHUB_REPOSITORY}/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"
